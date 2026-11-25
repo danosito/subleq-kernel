@@ -1,0 +1,337 @@
+diff --git a/arch/subleq/Kconfig b/arch/subleq/Kconfig
+index 7fada6751..a4795de06 100644
+--- a/arch/subleq/Kconfig
++++ b/arch/subleq/Kconfig
+@@ -25,6 +25,13 @@ config SUBLEQ
+ 	  operation is "subtract and branch if less than or equal to zero."
+ 	  This port runs on the Subleq virtual machine.
+ 
++config SUBLEQ_IDLE_WAKEUP_V1
++	bool "ESI interruptible idle MMIO ABI v1"
++	default n
++	help
++	  Enable only with a machine that implements the interruptible idle
++	  register at 0x63000000. Legacy ESI machines do not map this register.
++
+ config MMU
+ 	def_bool n
+ 
+@@ -92,3 +99,17 @@ config HZ
+ 	default 100
+ 
+ source "kernel/Kconfig.hz"
++
++config SUBLEQ_QEMU_VIRTIO
++	bool "Draft QEMU virtio-mmio slots"
++	depends on VIRTIO_MMIO=y && !VIRTIO_MMIO_CMDLINE_DEVICES
++	help
++	  Probe four fixed virtio-mmio slots (block, net, RNG, block).
++	  Do not enable on stock ESI: the apertures and device interrupt are
++	  machine extensions. This configuration requires all four slots.
++
++config SUBLEQ_QEMU_VIRTIO_RNG
++	bool "Use ESI slot 2 for a trusted host RNG"
++	depends on SUBLEQ_QEMU_VIRTIO && HW_RANDOM_VIRTIO=y
++	help
++	  Slot 2 is required to contain virtio-rng in the four-slot profile.
+diff --git a/arch/subleq/configs/qemu_virtio.config b/arch/subleq/configs/qemu_virtio.config
+new file mode 100644
+index 000000000..f341046e3
+--- /dev/null
++++ b/arch/subleq/configs/qemu_virtio.config
+@@ -0,0 +1,11 @@
++CONFIG_VIRTIO_MENU=y
++CONFIG_VIRTIO_MMIO=y
++CONFIG_SUBLEQ_QEMU_VIRTIO=y
++CONFIG_NET=y
++CONFIG_INET=y
++CONFIG_NETDEVICES=y
++CONFIG_VIRTIO_NET=y
++CONFIG_BLOCK=y
++CONFIG_BLK_DEV=y
++CONFIG_VIRTIO_BLK=y
++CONFIG_EXT4_FS=y
+diff --git a/arch/subleq/include/asm/io.h b/arch/subleq/include/asm/io.h
+index 5dccf3ce3..1275d1ba6 100644
+--- a/arch/subleq/include/asm/io.h
++++ b/arch/subleq/include/asm/io.h
+@@ -23,6 +23,70 @@
+ #define __raw_writew(v, a) (*(volatile u16 __force *)(a) = (v))
+ #define __raw_writel(v, a) (*(volatile u32 __force *)(a) = (v))
+ 
++#ifdef CONFIG_SUBLEQ_QEMU_VIRTIO
++#include <linux/bug.h>
++#include <asm/qemu-virtio.h>
++
++/* Modern net/blk configuration reads can extract little-endian lanes
++ * from aligned words. There is no subword device write on this machine.
++ */
++static inline u32 subleq_virtio_lanes(unsigned long addr)
++{
++	return subleq_mmio_read32((const void __iomem *)(addr & ~3UL))
++		>> (8 * (addr & 3));
++}
++
++#define readb readb
++static inline u8 readb(const volatile void __iomem *p)
++{
++	if (subleq_virtio_addr((unsigned long)p))
++		return subleq_virtio_lanes((unsigned long)p);
++	return __raw_readb(p);
++}
++
++#define readw readw
++static inline u16 readw(const volatile void __iomem *p)
++{
++	if (!subleq_virtio_addr((unsigned long)p))
++		return __raw_readw(p);
++	if (WARN_ON_ONCE((unsigned long)p & 1))
++		return 0;
++	return subleq_virtio_lanes((unsigned long)p);
++}
++
++#define readl readl
++static inline u32 readl(const volatile void __iomem *p)
++{
++	if (!subleq_virtio_addr((unsigned long)p))
++		return __raw_readl(p);
++	if (WARN_ON_ONCE((unsigned long)p & 3))
++		return 0;
++	return subleq_mmio_read32(p);
++}
++
++#define writeb writeb
++static inline void writeb(u8 value, volatile void __iomem *p)
++{
++	if (!WARN_ON_ONCE(subleq_virtio_addr((unsigned long)p)))
++		__raw_writeb(value, p);
++}
++
++#define writew writew
++static inline void writew(u16 value, volatile void __iomem *p)
++{
++	if (!WARN_ON_ONCE(subleq_virtio_addr((unsigned long)p)))
++		__raw_writew(value, p);
++}
++
++#define writel writel
++static inline void writel(u32 value, volatile void __iomem *p)
++{
++	if (!subleq_virtio_addr((unsigned long)p))
++		__raw_writel(value, p);
++	else if (!WARN_ON_ONCE((unsigned long)p & 3))
++		subleq_mmio_write32(p + SUBLEQ_VIRTIO_ALIAS, value);
++}
++#else
+ #define readb(a) __raw_readb(a)
+ #define readw(a) __raw_readw(a)
+ #define readl(a) __raw_readl(a)
+@@ -30,6 +94,7 @@
+ #define writeb(v, a) __raw_writeb(v, a)
+ #define writew(v, a) __raw_writew(v, a)
+ #define writel(v, a) __raw_writel(v, a)
++#endif
+ 
+ #define readb_relaxed(a) readb(a)
+ #define readw_relaxed(a) readw(a)
+diff --git a/arch/subleq/include/asm/qemu-virtio.h b/arch/subleq/include/asm/qemu-virtio.h
+new file mode 100644
+index 000000000..21845b83c
+--- /dev/null
++++ b/arch/subleq/include/asm/qemu-virtio.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_SUBLEQ_QEMU_VIRTIO_H
++#define _ASM_SUBLEQ_QEMU_VIRTIO_H
++
++#define SUBLEQ_VIRTIO_BASE	0x60000000UL
++#define SUBLEQ_VIRTIO_STRIDE	0x1000UL
++/* Four-slot machine extension; not available on legacy ESI machines. */
++#define SUBLEQ_VIRTIO_SLOTS	4
++#define SUBLEQ_VIRTIO_ALIAS	0x01000000UL /* displacement from read window */
++#define SUBLEQ_VIRTIO_PENDING	0x62000000UL
++#define SUBLEQ_VIRTIO_IRQ	1
++
++u32 subleq_mmio_read32(const volatile void __iomem *addr);
++void subleq_mmio_write32(volatile void __iomem *alias, u32 value);
++void subleq_dispatch_virtio_irq(void);
++
++static inline bool subleq_virtio_addr(unsigned long addr)
++{
++	return addr - SUBLEQ_VIRTIO_BASE < SUBLEQ_VIRTIO_SLOTS * SUBLEQ_VIRTIO_STRIDE;
++}
++#endif
+diff --git a/arch/subleq/kernel/Makefile b/arch/subleq/kernel/Makefile
+index 76062677f..6bfc1a60b 100644
+--- a/arch/subleq/kernel/Makefile
++++ b/arch/subleq/kernel/Makefile
+@@ -21,3 +21,4 @@ obj-$(CONFIG_FRAMEBUFFER_CONSOLE) += fbcon.o bitblit.o direct_putcs_asm.o
+ 
+ 
+ always-$(KBUILD_BUILTIN) := vmlinux.lds
++obj-$(CONFIG_SUBLEQ_QEMU_VIRTIO) += qemu-mmio.o qemu-virtio.o
+diff --git a/arch/subleq/kernel/irq.c b/arch/subleq/kernel/irq.c
+index cf989e032..fa6abcb09 100644
+--- a/arch/subleq/kernel/irq.c
++++ b/arch/subleq/kernel/irq.c
+@@ -22,6 +22,9 @@
+ #include <asm/irq_regs.h>
+ #include <asm/ptrace.h>
+ #include <asm/current.h>
++#ifdef CONFIG_SUBLEQ_QEMU_VIRTIO
++#include <asm/qemu-virtio.h>
++#endif
+ 
+ /*
+  * Memory-mapped interrupt registers
+@@ -120,6 +123,10 @@ void subleq_do_IRQ(struct pt_regs *regs)
+ 			legacy_timer_tick(ticks);
+ 	}
+ 
++#ifdef CONFIG_SUBLEQ_QEMU_VIRTIO
++	subleq_dispatch_virtio_irq();
++#endif
++
+ 	/* Exit IRQ context - may trigger softirqs */
+ 	irq_exit();
+ 
+@@ -141,6 +148,12 @@ void __init init_IRQ(void)
+ 	 */
+ 	*INT_SAVED_HANDLER = (unsigned long)subleq_irq_entry;
+ 
++#ifdef CONFIG_SUBLEQ_QEMU_VIRTIO
++	/* The transport has no board-level ACK or mask register. */
++	irq_set_chip_and_handler(SUBLEQ_VIRTIO_IRQ, &dummy_irq_chip,
++				 handle_simple_irq);
++#endif
++
+ 	pr_info("Subleq IRQ: handler installed at 0x%lx\n",
+ 		(unsigned long)subleq_irq_entry);
+ }
+diff --git a/arch/subleq/kernel/process.c b/arch/subleq/kernel/process.c
+index 7e5969f89..fa8e3eb48 100644
+--- a/arch/subleq/kernel/process.c
++++ b/arch/subleq/kernel/process.c
+@@ -21,14 +21,15 @@
+ /* Signal handling - for ret_to_user_prep work checks */
+ extern bool do_signal(struct pt_regs *regs);
+ 
+-/*
+- * The idle thread - just spin
+- */
+-
++/* The opt-in board register suspends until a timer/device interrupt. */
+ void __cpuidle arch_cpu_idle(void)
+ {
+ 	raw_local_irq_enable();
+-	/* Busy wait - Subleq has no halt instruction */
++#ifdef CONFIG_SUBLEQ_IDLE_WAKEUP_V1
++	if (!need_resched())
++		*(volatile unsigned int *)0x63000000 = 1;
++#endif
++	/* Legacy ESI continues polling instead of entering unsupported idle. */
+ }
+ 
+ /*
+diff --git a/arch/subleq/kernel/qemu-mmio.S b/arch/subleq/kernel/qemu-mmio.S
+new file mode 100644
+index 000000000..b41ec517e
+--- /dev/null
++++ b/arch/subleq/kernel/qemu-mmio.S
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#include <asm/subleq-regs.h>
++
++	.text
++	.globl subleq_mmio_read32
++	.type subleq_mmio_read32,@function
++subleq_mmio_read32:
++	.word REG_Z, REG_Z, .+4
++	.word REG_R21 | INDIRECT, REG_Z, .+4
++	.word REG_R20, REG_R20, .+4
++	.word REG_Z, REG_R20, .+4
++	.word REG_Z, REG_Z, REG_RA | INDIRECT
++	.size subleq_mmio_read32, . - subleq_mmio_read32
++
++	.globl subleq_mmio_write32
++	.type subleq_mmio_write32,@function
++subleq_mmio_write32:
++	/* R21 is the zero-on-read alias. Stage -value in register RAM. */
++	.word REG_Z, REG_Z, .+4
++	.word REG_R22, REG_Z, .+4
++	.word REG_Z, REG_R21 | INDIRECT, .+4
++	.word REG_Z, REG_Z, REG_RA | INDIRECT
++	.size subleq_mmio_write32, . - subleq_mmio_write32
+diff --git a/arch/subleq/kernel/qemu-virtio.c b/arch/subleq/kernel/qemu-virtio.c
+new file mode 100644
+index 000000000..00dafa2ce
+--- /dev/null
++++ b/arch/subleq/kernel/qemu-virtio.c
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/dma-mapping.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/irq.h>
++#include <linux/irqdesc.h>
++#include <linux/platform_device.h>
++#include <linux/virtio_blk.h>
++#include <linux/virtio_ids.h>
++#include <linux/virtio_mmio.h>
++
++static u32 subleq_virtio_registered;
++
++void subleq_dispatch_virtio_irq(void)
++{
++	u32 registered = READ_ONCE(subleq_virtio_registered);
++
++	/* Sample once per timer entry. Each shared handler ACKs its own device. */
++	if (registered &&
++	    (subleq_mmio_read32((void __iomem *)SUBLEQ_VIRTIO_PENDING) & registered))
++		generic_handle_irq(SUBLEQ_VIRTIO_IRQ);
++}
++
++static int __init subleq_register_virtio(void)
++{
++	unsigned int i;
++
++	for (i = 0; i < SUBLEQ_VIRTIO_SLOTS; i++) {
++		unsigned long base = SUBLEQ_VIRTIO_BASE + i * SUBLEQ_VIRTIO_STRIDE;
++		void __iomem *regs = (void __iomem *)base; /* flat NOMMU */
++		struct resource res[] = {
++			DEFINE_RES_MEM(base, SUBLEQ_VIRTIO_STRIDE),
++			DEFINE_RES_IRQ(SUBLEQ_VIRTIO_IRQ),
++		};
++		struct platform_device_info info = {
++			.name = "virtio-mmio", .id = i,
++			.res = res, .num_res = ARRAY_SIZE(res),
++			.dma_mask = DMA_BIT_MASK(32),
++		};
++		struct platform_device *pdev;
++		u32 id;
++
++		if (readl(regs + VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976 ||
++		    readl(regs + VIRTIO_MMIO_VERSION) != 2)
++			continue;
++		id = readl(regs + VIRTIO_MMIO_DEVICE_ID);
++		if (id != (i == 2 ? VIRTIO_ID_RNG :
++			   i == 1 ? VIRTIO_ID_NET : VIRTIO_ID_BLOCK)) {
++			if (i == 3)
++				pr_err("subleq: required fourth block slot missing\n");
++			continue;
++		}
++		if (id == VIRTIO_ID_BLOCK) {
++			writel(0, regs + VIRTIO_MMIO_DEVICE_FEATURES_SEL);
++			if (readl(regs + VIRTIO_MMIO_DEVICE_FEATURES) & BIT(VIRTIO_BLK_F_CONFIG_WCE)) {
++				pr_warn("subleq: block slot requires config-wce=off\n");
++				continue;
++			}
++		}
++		pdev = platform_device_register_full(&info);
++		if (IS_ERR(pdev))
++			return PTR_ERR(pdev);
++		WRITE_ONCE(subleq_virtio_registered, subleq_virtio_registered | BIT(i));
++	}
++	return 0;
++}
++arch_initcall(subleq_register_virtio);

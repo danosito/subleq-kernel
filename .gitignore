@@ -1,0 +1,6 @@
+/.port-work/
+/.verify/
+/.work/
+*.bootimage
+/vmlinux
+/out/
