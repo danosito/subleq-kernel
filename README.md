@@ -25,4 +25,12 @@ The console-only [upstream VM](https://github.com/adriancable/eternal/blob/23d4d
 
 ## Verification
 
-Against fresh extracted files from the pinned pristine public Linux commit: `git apply --check` and `git apply` passed. On native x86-64 Linux a pinned ESI Clang compiled the independent static init (`ELF32`, `Machine: Subleq`); `make ARCH=subleq defconfig`, `scripts/config` and `make ARCH=subleq olddefconfig` enabled `SUBLEQ_QEMU_VIRTIO`, `SUBLEQ_QEMU_VIRTIO_RNG`, `SUBLEQ_IDLE_WAKEUP_V1`, `VIRTIO_MMIO`, `VIRTIO_BLK`, `VIRTIO_NET`, `HW_RANDOM_VIRTIO`, `EXT4_FS`. Full `vmlinux` build outcome and guest boot must be recorded separately; neither is implied by config success.
+Verified on **Debian GNU/Linux 13 (trixie), x86-64**, using a fresh archive of the pinned *public* Linux commit and a prebuilt ESI Clang 22.1.0 SDK based on the pinned public LLVM source (the compiler binary itself was not rebuilt in this verification):
+
+- `git apply --check port.patch && git apply port.patch`: success against pristine source.
+- `clang -target subleq-unknown-linux --sysroot=PUBLIC_ESI_SYSROOT -isystem PUBLIC_ESI_UCLIBC_KERNEL_HEADERS -O2 -static -o rootfs/init init.c`: success; static init is `ELF32`, `Machine: Subleq`.
+- `make ARCH=subleq CC=ESI_CLANG LD=ESI_LLD AR=ESI_AR NM=ESI_NM OBJCOPY=ESI_OBJCOPY defconfig`; `scripts/config --file .config --set-str INITRAMFS_SOURCE ROOTFS_LIST --set-str CMDLINE 'console=ttyS0 init=/init loglevel=5' -e VIRTIO_MENU -e VIRTIO_MMIO -e SUBLEQ_QEMU_VIRTIO -e SUBLEQ_QEMU_VIRTIO_RNG -e SUBLEQ_IDLE_WAKEUP_V1 -e HW_RANDOM -e HW_RANDOM_VIRTIO -e BLOCK -e BLK_DEV -e VIRTIO_BLK -e VIRTIO_NET -e EXT4_FS`; `make ARCH=subleq ... olddefconfig`: success; all eight kernel-feature symbols checked by `scripts/build.sh` resolved `=y`.
+- `make -j2 ARCH=subleq CC=ESI_CLANG LD=ESI_LLD AR=ESI_AR NM=ESI_NM OBJCOPY=ESI_OBJCOPY vmlinux`: **exit 0**, 74 MiB ELF32 Subleq `vmlinux` (SHA-256 `4c2d64edf4b551d6c2fe064effdacbdc9e4fba9ffbc6193dd25b4c37825210ba`). The initramfs list contains only `/dev/console` and the independent static `/init`.
+- Pinned ESI `tools/make_boot_image.py --llvm-bin ESI_LLVM_BIN --stack-size 536870912 --output OUTPUT vmlinux`: **exit 0**, 73 MiB bootimage. The image and compiler remain local and are **not** distributed here.
+
+**Guest boot, four-slot device behavior and marker output have not been validated**: a compatible public four-slot QEMU machine is not shipped in this repo. Do not infer runtime correctness from build success.
