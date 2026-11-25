@@ -16,11 +16,14 @@ done
 # The independent init links statically; never embed ESI's bundled rootfs.
 "$ESI/tools/clang_userspace.sh" "$ROOT/rootfs/init.c" "$OUT/rootfs/init" -static
 chmod 755 "$OUT/rootfs/init"
+# gen_init_cpio list gives PID 1 a console without needing root privileges.
+printf 'dir /dev 0755 0 0\nnod /dev/console 0600 0 0 c 5 1\nfile /init %s 0755 0 0\n' \
+    "$OUT/rootfs/init" > "$OUT/rootfs.list"
 L="$OUT/linux"
 T="$ESI/llvm-project/build/bin"
 args=(ARCH=subleq CC="$T/clang" LD="$T/ld.lld" AR="$T/llvm-ar" NM="$T/llvm-nm" OBJCOPY="$T/llvm-objcopy")
 make -C "$L" "${args[@]}" defconfig
-"$L/scripts/config" --file "$L/.config" --set-str INITRAMFS_SOURCE "$OUT/rootfs" \
+"$L/scripts/config" --file "$L/.config" --set-str INITRAMFS_SOURCE "$OUT/rootfs.list" \
     --set-str CMDLINE 'console=ttyS0 init=/init loglevel=5' \
     -e VIRTIO_MENU -e VIRTIO_MMIO -e SUBLEQ_QEMU_VIRTIO \
     -e SUBLEQ_QEMU_VIRTIO_RNG -e SUBLEQ_IDLE_WAKEUP_V1 \
